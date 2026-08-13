@@ -146,7 +146,7 @@ jobs:
       # 새 실행 환경에서 S3 backend 다시 연결
       - name: Terraform Init
         run: |
-          terrform -chdir="$TF_WORKING_DIR" init \
+          terraform -chdir="$TF_WORKING_DIR" init \
             -input=false
 
       # plan Job이 생성한 tfplan 다운로드
