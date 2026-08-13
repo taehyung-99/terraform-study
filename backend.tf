@@ -10,6 +10,6 @@ terraform {
         region = "ap-northeast-2"
 
         encrypt= true # state 파일 암호화해서 저장
-        user_lockfile = true # 동시에 여러 작업이 state 변경 못하도록 잠금
+        use_lockfile = true # 동시에 여러 작업이 state 변경 못하도록 잠금
     }
 }
