@@ -13,7 +13,7 @@ on:
       -  ".github/workflows/terraform.yaml"
 
   # Actions 화면에서도 버튼으로 실행 가능
-  workflows_dispatch:
+  workflow_dispatch:
 
 # Github Actions 에 부여할 권한
 permissions:
