@@ -1,0 +1,17 @@
+# Terraform 이 다운로드한 Provider 와 모듈
+.terraform/
+
+# 로컬 State 파일
+*.tfstate
+*.tfstate.*
+
+# 저장된 Plan 파일
+tfplan
+
+# 오류 로그
+crash.log
+crash.*.log
+
+# 민감한 변수 파일
+*.auto.tfvars
+*.auto.tfvars.json
