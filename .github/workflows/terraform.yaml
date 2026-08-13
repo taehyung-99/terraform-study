@@ -1,0 +1,166 @@
+# Actions 화면에 표시되는 워크플로 이름
+name: Terraform Plan and Apply
+
+# 워크플로 실행 조건
+on:
+  # main 브랜치에 Terraform 관련 파일이 push 되면 실행
+  push:
+    branches:
+      - main
+    paths:
+      - "**/*.tf"
+      - ".terraform.lock.hcl"
+      -  ".github/workflows/terraform.yaml"
+
+  # Actions 화면에서도 버튼으로 실행 가능
+  workflows_dispatch:
+
+# Github Actions 에 부여할 권한
+permissions:
+  # 레포 코드를 읽는 권한
+  contents: read
+  # AWS OIDC 인증 토큰을 발급받는 권한
+  id-token: write
+
+# 모든 Job 이 공통으로 사용하는 환경변수
+env:
+  # Terraform 자동화 환경임을 표시
+  TF_IN_AUTOMATION:: "true"
+  # Terraform 이 사용자 입력을 기다리지 않게 설정
+  TF_INPUT: "false"
+  # Terraform 파일이 레포 최상위에 있으므로 "."
+  TF_WORKING_DIR: "."
+  # S3 버킷과 AWS 리전
+  AWS_REGION: "ap-northeast-2"
+
+# 동일한 State 를 사용하는 워크플로의 동시 실행 방지
+concurrency:
+  group: terraform-production
+  
+  # 새 실행이 시작돼도 기존 작업을 강제로 취소하지 않음
+  cancel-in-progress: false
+
+jobs:
+  # 첫 번째 Job: Terraform 변경 게획 작성
+  plan:
+    name: Terraform Init, Validate and Plan
+
+    # GitHub가 제공하는 임시 Ubuntu 실행 환경
+    runs-on: ubuntu-latest
+
+    steps:
+      # 레포 코드를 Ubuntu 실행 환경으로 가져옴
+      - name: 저장소 코드 가져오기
+        uses: actions/checkout@v7
+      
+      # 지정한 버전의 Terraform 설치
+      - name: 테라폼 설치
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.14.6"
+          terraform_wrapper: false
+      
+      # Github OIDC 토큰을 이용해 AWS Plan Role 의 임시 권한을 받음
+      - name: AWS Plan Role 인증
+        uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_TERRAFORM_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-terraform-plan
+      
+      # 올바른 AWS 계정과 Role로 인증됐는지 확인
+      # Access Key 나 비밀번호는 출력하지 않음
+      - name: AWS 인증 확인
+        run: aws sts get-caller-identity
+      
+      # backend.tf 를 읽고 S3 State backend 연결
+      - name: Terraform Init
+        run: |
+          terraform -chdir="$TF_WORKING_DIR" init \
+            -input=false
+      
+      # Terraform 코드의 문법과 참조 검사
+      - name: Terraform Validate
+        run: |
+          terraform -chdir="$TF_WORKING_DIR" validate \
+            -no-color
+      
+      # 실제 변경 없이 실행 계획만 생성
+      # 승인 후 같은 계획을 적용하기 위해 tfplan 파일로 저장
+      - name: Terraform Plan
+        run: |
+          terraform -chdir="$TF_WORKING_DIR" plan \
+            -input=false \
+            -no-color \
+            -out=tfplan
+      
+      # Job 종료 후에도 apply Job 에서 사용할 수 있도록
+      # tfplan 파일을 GitHub 에 임시 저장
+      - name: Plan 파일 임시 저장
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ github.sha }}
+          path: ${{ env.TF_WORKING_DIR }}/tfplan
+
+          # Plan 에는 민감한 정보가 포함될 수 있으므로 하루만 보관
+          retention-days: 1
+          if-no-files-found: error
+  
+  # 두 번째 Job: 승인 후 Plan 적용
+  apply:
+    name: Approve and Terraform Apply
+
+    # plan Job 이 성공해야 실행 가능
+    needs: plan
+
+    # 새로운 별도 Ubuntu 실행 환경
+    runs-on: ubuntu-latest
+
+    # Github의 production Environment 승인 규칙 적용
+    environment: production
+
+    steps:
+      # apply Job 은 새 실행 환경이므로 코드도 다시 가져옴
+      - name: 저장소 코드 가져오기
+        uses: actions/checkout@v7
+
+      # plan 과 동일한 Terraform 버전 설치
+      - name: Terraform 설치
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.14.6"
+          terraform_wrapper: false
+      
+      # 승인 후 AWS Apply Role 의 임시 권한을 받음
+      - name: AWS Apply Role 인증
+        uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_TERRAFORM_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-terraform-apply
+      
+      # 올바른 AWS 계정과 Apply Role 인지 확인
+      - name: AWS 인증 확인
+        run: aws sts get-caller-identity
+      
+      # 새 실행 환경에서 S3 backend 다시 연결
+      - name: Terraform Init
+        run: |
+          terrform -chdir="$TF_WORKING_DIR" init \
+            -input=false
+
+      # plan Job이 생성한 tfplan 다운로드
+      - name: 승인된 Plan 파일 가져오기
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-${{ github.sha }}
+          path: ${{ env.TF_WORKING_DIR }}
+      
+      # 앞에서 생성하고 승인한 Plan 을 그대로 적용
+      # Apply 결과 State 는 S3에 자동 저장
+      - name: Terraform Apply
+        run: |
+          terraform -chdir="$TF_WORKING_DIR" apply \
+            -input=false \
+            tfplan
+
